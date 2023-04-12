@@ -1,0 +1,161 @@
+// Single timepoint blue light illumination to release caged reagent and Multi-Dimensional Acquisition
+// Author @Gembu Maryu
+
+// Microscope: Olympus IX83
+// Light source: Lumencor Spectra III
+// XY-Stage: Prior motorized stages
+// Emission shutter wheel: Prior HF108IX3 filter wheel
+
+import java.lang.System;
+import org.micromanager.api.PositionList;
+import org.micromanager.api.MultiStagePosition;
+import org.micromanager.api.StagePosition;
+import ij.process.*;
+import ij.ImagePlus;
+import ij.io.FileSaver;
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// DO NOT USE Autoshutter for this script 
+// Set all position in advance by the position manager in the original MDA
+
+// parameters for file locations //
+// acqName and rootDirName should be concatenate to save data
+acqName = "test_cagedCa";
+//rootDirName = "C:/Users/biop-yanglab/Documents/Gembu";
+rootDirName = "D:/gembu";
+prefix = "cagedCa_";
+
+// parameters for time-course //
+duration = 10; // duration of imaging (min)
+interval = 1; // time interval (min)
+
+// parameters for illumination //
+channelGroup = "Filter";
+String[] channels = {"2-CFP", "4-FRET", "5-YFP", "1-BFP"}; // put name of channels. The last channel is for opto. 
+int[] exposures = {50, 50, 50, 300}; // exposure time "msec" (if these value was not assighned, default value will be used)
+
+// parameters for optogenetics
+releaseTimeFrame = 2; // frame number
+releaseChannel = channels[3]; // the last element of "channels"
+releaseIllumination = exposures[3]; // the last element of "exposures"
+
+// test-mode: factor=60, experiment: factor=1
+factor = 2;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// parameters for position //
+// set position by "Stage Position List panel"
+PositionList pl = gui.getPositionList();
+String[] acqs = new String[pl.getNumberOfPositions()];
+
+// params for microscope
+
+acqDir = rootDirName+"/"+acqName;
+print("acqDir is " + acqDir);
+numFrames = duration / interval + 1; // total number of timepoints
+intervalFrame = interval * 60 * 1000 / factor; // "msec"
+//intervalFrame = 20000; // "msec"
+numSlices = 1; // (maybe) number of z-stack
+//releaseIlluminationmsc2 = releaseIllumination * 60 * 1000 / factor;
+releaseIlluminationmsc2 = releaseIllumination;
+
+// clear all previous acquisitions //
+gui.closeAllAcquisitions();
+gui.clearMessageWindow();
+
+// multi-dimensional acquisition
+for (int t=0; t < numFrames; t++){ 
+	// loop with time
+	reStart = System.currentTimeMillis();
+	//print(reStart);
+	
+	for (int l=0; l < pl.getNumberOfPositions(); l++) {
+		// loop with positions
+		acqs[l] = pl.getPosition(l).getLabel()+"_t"+t;
+		print("Acqs: " + acqs[l]);
+		MultiStagePosition.goToPosition(pl.getPosition(l), mmc); // move to next position.
+		
+		// create acquisition and set options
+		gui.openAcquisition(acqs[l], acqDir, numFrames, channels.length-1, numSlices);
+		for (int i=0; i<channels.length; i++)
+  			gui.setChannelName(acqs[l], i, channels[i]);		
+
+		for (int j=0; j<channels.length-1; j++) {
+		// loop with channels
+   		mmc.setProperty("EpiShutter 1", "State", 0); // close the shutter
+   		// change illumination config
+   		mmc.setExposure(exposures[j]);
+   		mmc.setConfig(channelGroup, channels[j]);
+   		mmc.waitForConfig(channelGroup, channels[j]);
+   		gui.message("Acquiring frame " + t + ", channel " + channels[j] +".");   		
+			mmc.setProperty("EpiShutter 1", "State", 1); // open the shutter
+	 		mmc.snapImage(); // take an image
+	 		mmc.setProperty("EpiShutter 1", "State", 0); // close the shutter
+			
+			// save pre-frame to TIF
+	 		img = mmc.getImage();
+			width = mmc.getImageWidth();
+			height = mmc.getImageHeight();
+			byteDepth = mmc.getBytesPerPixel();
+
+			if (byteDepth == 1) { // 8-bit
+				ip = new ByteProcessor((int)width, (int)height);
+				ip.setPixels(img);
+			} else if (byteDepth == 2) { // 16-bit
+				ip = new ShortProcessor((int)width, (int)height);
+				ip.setPixels(img);
+			} else {
+				console.message("Unknown byte depth.");
+				return;
+			}
+			ip.setPixels(img);
+			prePath = acqDir + "/" + prefix + "_" + pl.getPosition(l).getLabel() + "_" + channels[j] + "_t" + t + ".tif" ;
+			print(prePath);
+			ImagePlus imp = new ImagePlus(prePath, ip);
+			FileSaver fs = new FileSaver(imp);
+			fs.saveAsTiff(prePath);
+		}
+		gui.closeAcquisition(acqs[l]);
+		mmc.setConfig(channelGroup, channels[0]);
+		mmc.waitForConfig(channelGroup, channels[0]);
+	}
+	//itTook = System.currentTimeMillis() - reStart; // turnaround time (msec)
+	//tLeft= interval * 60 * 1000 - itTook // time left to next cycle (msec)
+	
+	if (t == releaseTimeFrame){
+		// light illumination for caged-reagent release
+		mmc.setProperty("Condenser turret", "State", 3); //? Bright-field?
+		mmc.setProperty("DiaShutter", "State", 0); //? Bright-field?
+		mmc.setConfig(channelGroup, releaseChannel);
+		mmc.waitForConfig(channelGroup, releaseChannel);
+		mmc.setProperty("EpiShutter 1", "State", 1);
+		
+		for (int l=0; l < pl.getNumberOfPositions(); l++) {
+			acqs[l] = pl.getPosition(l).getLabel()+"_t"+t;
+			print("Acqs: " + acqs[l]);
+			MultiStagePosition.goToPosition(pl.getPosition(l), mmc); // move to next position.
+			gui.sleep(releaseIlluminationmsc2);
+   	}
+   	mmc.setProperty("EpiShutter 1", "State", 0);  	
+		mmc.setProperty("Condenser turret", "State", 0); //? Bright-field?
+		mmc.setProperty("DiaShutter", "State", 0); //? Bright-field?
+	}
+	// move to the first position
+	MultiStagePosition.goToPosition(pl.getPosition(0), mmc); // move to next position.
+	itTook = System.currentTimeMillis() - reStart; // turnaround time
+	tLeft= intervalFrame - itTook; // time left to next cycle (msec)
+	// Show the time left and sleep		
+	if (itTook < intervalFrame){
+		print("Next frame starts in: ");
+		print(tLeft);
+		gui.sleep(tLeft);
+	}else{
+		print(tLeft);
+		print("Warning: Interval is too short.");
+	}
+}
+mmc.setProperty("EpiShutter 1", "State", 0);
+print("End of Acquire");

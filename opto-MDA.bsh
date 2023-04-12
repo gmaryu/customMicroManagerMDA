@@ -1,0 +1,149 @@
+// Periodic illumination to activate optogenetic system and Multi-Dimensional Acquisition
+// Author @Gembu Maryu
+
+// Microscope: Olympus IX83
+// Light source: Lumencor Spectra III
+// XY-Stage: Prior motorized stages
+// Emission shutter wheel: Prior HF108IX3 filter wheel
+
+import java.lang.System;
+import org.micromanager.api.PositionList;
+import org.micromanager.api.MultiStagePosition;
+import org.micromanager.api.StagePosition;
+import ij.process.*;
+import ij.ImagePlus;
+import ij.io.FileSaver;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// DO NOT USE Autoshutter for this script 
+// Set all position in advance by the position manager in the original MDA
+
+// parameters for file locations //
+// acqName and rootDirName should be concatenate to save data
+acqName = "test_opto";
+rootDirName = "D:/gembu";
+prefix = "Sample";
+
+// parameters for time-course //
+duration = 1500; // duration of imaging (min)
+interval = 5; // time interval (min)
+
+// parameters for illumination //
+channelGroup = "Channel";
+String[] channels = {"10-mKO", "6-YFP", "7-RFP-mCherry-T", "5-GFP"}; // put name of channels. The last channel is for opto. 
+int[] exposures = {300, 400, 500, 3000}; // exposure time "msec" (if these value was not assighned, default value will be used)
+// for lumencore
+// Color[] colors = {Color.WHITE, Color.GREEN}; // Not sure what is this. Maybe required for Lumencor
+
+// parameters for optogenetics
+optoInterval = 12; // frame number
+optoChannel = channels[3];
+optoIllumination = exposures[3]; // msec
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// parameters for position //
+// set position by "Stage Position List panel"
+PositionList pl = gui.getPositionList();
+String[] acqs = new String[pl.getNumberOfPositions()];
+
+// params for microscope
+factor = 1; // test-mode:60, normal:1
+acqDir = rootDirName+"/"+acqName;
+print("acqDir is " + acqDir);
+numFrames = duration / interval + 1; // number of timepoint
+intervalFrame = interval * 60 * 1000 / factor; // "msec"
+//intervalFrame = 20000; // "msec"
+numSlices = 1; // (maybe) number of z-stack
+optoIlluminationmsc2 = optoIllumination * 60 * 1000 / factor;
+
+
+// clear all previous acquisitions //
+gui.closeAllAcquisitions();
+gui.clearMessageWindow();
+
+// multi-dimensional acquisition
+for (int t=1; t < numFrames+1; t++){
+	reStart = System.currentTimeMillis();
+	print(reStart);
+
+	for (int l=0; l < pl.getNumberOfPositions(); l++) {
+		acqs[l] = pl.getPosition(l).getLabel()+"_t"+t;
+		print("Acqs: " + acqs[l]);
+		MultiStagePosition.goToPosition(pl.getPosition(l), mmc); // move to next position.
+		
+		// create acquisition and set options
+		gui.openAcquisition(acqs[l], acqDir, numFrames, channels.length-1, numSlices);
+		for (int i=0; i<channels.length; i++)
+  			gui.setChannelName(acqs[l], i, channels[i]);
+  		// for (int i=0; i<colors.length; i++)
+ 		//	gui.setChannelColor(acqs[l], i, colors[i]);
+
+		for (int j=0; j<channels.length-1; j++) {
+   		// change illumination config
+   		mmc.setProperty("EpiShutter 1", "State", 0);
+   		mmc.setExposure(exposures[j]);
+   		mmc.setConfig(channelGroup, channels[j]);
+   		mmc.waitForConfig(channelGroup, channels[j]);
+   		gui.message("Acquiring frame " + t + ", channel " + channels[j] +".");   		
+			mmc.setProperty("EpiShutter 1", "State", 1);
+	 		mmc.snapImage();
+	 		mmc.setProperty("EpiShutter 1", "State", 0);
+			
+			// save pre-frame to TIF
+	 		img = mmc.getImage();
+			width = mmc.getImageWidth();
+			height = mmc.getImageHeight();
+			byteDepth = mmc.getBytesPerPixel();
+
+   		if (byteDepth == 1) { // 8-bit
+			   ip = new ByteProcessor((int)width, (int)height);
+   			ip.setPixels(img);
+			} else if (byteDepth == 2) { // 16-bit
+			   ip = new ShortProcessor((int)width, (int)height);
+   			ip.setPixels(img);
+			} else {
+   			console.message("Unknown byte depth.");
+   			return;
+			}
+   		ip.setPixels(img);
+   		prePath = acqDir + "/" + prefix + "_" + pl.getPosition(l).getLabel() + "_" + channels[j] + "_t" + t + ".tif" ;
+   		print(prePath);
+			ImagePlus imp = new ImagePlus(prePath, ip);
+			FileSaver fs = new FileSaver(imp);
+			fs.saveAsTiff(prePath);
+		}
+		gui.closeAcquisition(acqs[l]);
+		mmc.setConfig(channelGroup, channels[0]);
+   	mmc.waitForConfig(channelGroup, channels[0]);
+	}
+	itTook = System.currentTimeMillis() - reStart; // turnaround time
+	
+	// light illumination for optogenetics
+	if (itTook < intervalFrame && t % optoInterval == 0){
+		mmc.setProperty("Condenser turret", "State", 3);
+		mmc.setProperty("DiaShutter", "State", 0);
+		mmc.setConfig(channelGroup, optoChannel);
+   	mmc.waitForConfig(channelGroup, optoChannel);
+   	mmc.setProperty("EpiShutter 1", "State", 1);
+   	for (int l=0; l < pl.getNumberOfPositions(); l++) {
+			acqs[l] = pl.getPosition(l).getLabel()+"_t"+t;
+			print("Acqs: " + acqs[l]);
+			MultiStagePosition.goToPosition(pl.getPosition(l), mmc); // move to next position.
+			gui.sleep((int)optoIlluminationmsc2);
+   	}   	
+   	mmc.setProperty("Condenser turret", "State", 0);
+   	mmc.setProperty("DiaShutter", "State", 0);
+   	itTook2 = System.currentTimeMillis() - reStart;
+		gui.sleep(intervalFrame - itTook2);
+	}if (itTook < intervalFrame){
+  		itTook2 = System.currentTimeMillis() - reStart; // turnaround time
+		gui.sleep(intervalFrame - itTook2);
+	}else{
+		print("Warning: Interval is too short.");
+	}
+
+}
+mmc.setProperty("EpiShutter 1", "State", 0);
+print("End of Acquire");
